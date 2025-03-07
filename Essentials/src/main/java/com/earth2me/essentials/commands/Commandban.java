@@ -7,6 +7,7 @@ import com.earth2me.essentials.User;
 import com.earth2me.essentials.utils.AdventureUtil;
 import com.earth2me.essentials.utils.FormatUtil;
 import net.ess3.api.TranslatableException;
+import net.essentialsx.api.v2.events.UserBanEvent;
 import org.bukkit.BanList;
 import org.bukkit.Server;
 
@@ -27,42 +28,51 @@ public class Commandban extends EssentialsCommand {
         if (args.length < 1) {
             throw new NotEnoughArgumentsException();
         }
-        User user;
+        final User user = sender.isPlayer() ? ess.getUser(sender.getPlayer()) : null;
+        User target;
         try {
-            user = getPlayer(server, args, 0, true, true);
+            target = getPlayer(server, args, 0, true, true);
         } catch (final PlayerNotFoundException e) {
             nomatch = true;
-            user = ess.getUser(new OfflinePlayerStub(args[0], ess.getServer()));
+            target = ess.getUser(new OfflinePlayerStub(args[0], ess.getServer()));
         }
-        if (!user.getBase().isOnline()) {
+        if (!target.getBase().isOnline()) {
             if (sender.isPlayer() && !ess.getUser(sender.getPlayer()).isAuthorized("essentials.ban.offline")) {
                 throw new TranslatableException("banExemptOffline");
             }
-        } else if (user.isAuthorized("essentials.ban.exempt") && sender.isPlayer()) {
+        } else if (target.isAuthorized("essentials.ban.exempt") && sender.isPlayer()) {
             throw new TranslatableException("banExempt");
         }
 
         final String senderName = sender.isPlayer() ? sender.getPlayer().getDisplayName() : Console.NAME;
         final String senderDisplayName = sender.isPlayer() ? sender.getPlayer().getDisplayName() : Console.DISPLAY_NAME;
-        final String banReason;
+        String banReason;
         if (args.length > 1) {
             banReason = FormatUtil.replaceFormat(getFinalArg(args, 1).replace("\\n", "\n").replace("|", "\n"));
         } else {
             banReason = tlLiteral("defaultBanReason");
         }
 
-        ess.getServer().getBanList(BanList.Type.NAME).addBan(user.getName(), banReason, null, senderName);
+        final UserBanEvent event = new UserBanEvent(target, user, banReason, null);
+        ess.getServer().getPluginManager().callEvent(event);
+
+        if (event.isCancelled()) {
+            return;
+        }
+        banReason = event.getReason();
+
+        ess.getServer().getBanList(BanList.Type.NAME).addBan(target.getName(), banReason, null, senderName);
 
         final String banDisplay = tlLiteral("banFormat", banReason, senderDisplayName);
 
-        user.getBase().kickPlayer(AdventureUtil.miniToLegacy(banDisplay));
-        ess.getLogger().log(Level.INFO, AdventureUtil.miniToLegacy(tlLiteral("playerBanned", senderDisplayName, user.getName(), banDisplay)));
+        target.getBase().kickPlayer(AdventureUtil.miniToLegacy(banDisplay));
+        ess.getLogger().log(Level.INFO, AdventureUtil.miniToLegacy(tlLiteral("playerBanned", senderDisplayName, target.getName(), banDisplay)));
 
         if (nomatch) {
-            sender.sendTl("userUnknown", user.getName());
+            sender.sendTl("userUnknown", target.getName());
         }
 
-        ess.broadcastTl(null, u -> !u.isAuthorized("essentials.ban.notify"), "playerBanned", senderDisplayName, user.getName(), banReason);
+        ess.broadcastTl(null, u -> !u.isAuthorized("essentials.ban.notify"), "playerBanned", senderDisplayName, target.getName(), banReason);
     }
 
     @Override

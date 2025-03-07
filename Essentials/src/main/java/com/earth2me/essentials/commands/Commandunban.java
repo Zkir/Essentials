@@ -4,8 +4,10 @@ import com.earth2me.essentials.CommandSource;
 import com.earth2me.essentials.Console;
 import com.earth2me.essentials.IUser;
 import com.earth2me.essentials.User;
+import com.earth2me.essentials.OfflinePlayerStub;
 import com.earth2me.essentials.utils.AdventureUtil;
 import net.ess3.api.TranslatableException;
+import net.essentialsx.api.v2.events.UserPardonEvent;
 import org.bukkit.BanList;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Server;
@@ -25,19 +27,30 @@ public class Commandunban extends EssentialsCommand {
             throw new NotEnoughArgumentsException();
         }
 
+        final User kicker = sender.isPlayer() ? ess.getUser(sender.getPlayer()) : null;
+
         String name;
+        User user;
         try {
-            final User user = getPlayer(server, args, 0, true, true);
+            user = getPlayer(server, args, 0, true, true);
             name = user.getName();
-            ess.getServer().getBanList(BanList.Type.NAME).pardon(name);
         } catch (final PlayerNotFoundException e) {
+            user = ess.getUser(new OfflinePlayerStub(args[0], ess.getServer()));
             final OfflinePlayer player = server.getOfflinePlayer(args[0]);
             name = player.getName();
             if (!player.isBanned()) {
                 throw new TranslatableException("playerNeverOnServer", args[0]);
             }
-            ess.getServer().getBanList(BanList.Type.NAME).pardon(name);
         }
+
+        final UserPardonEvent event = new UserPardonEvent(user, kicker);
+        ess.getServer().getPluginManager().callEvent(event);
+
+        if (event.isCancelled()) {
+            return;
+        }
+
+        ess.getServer().getBanList(BanList.Type.NAME).pardon(name);
 
         final String senderDisplayName = sender.isPlayer() ? sender.getPlayer().getDisplayName() : Console.DISPLAY_NAME;
         ess.getLogger().log(Level.INFO, AdventureUtil.miniToLegacy(tlLiteral("playerUnbanned", senderDisplayName, name)));
