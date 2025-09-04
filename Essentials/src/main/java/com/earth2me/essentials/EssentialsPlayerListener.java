@@ -6,6 +6,7 @@ import com.earth2me.essentials.textreader.IText;
 import com.earth2me.essentials.textreader.KeywordReplacer;
 import com.earth2me.essentials.textreader.TextInput;
 import com.earth2me.essentials.textreader.TextPager;
+import com.earth2me.essentials.userstorage.ModernUserMap;
 import com.earth2me.essentials.utils.AdventureUtil;
 import com.earth2me.essentials.utils.CommonPlaceholders;
 import com.earth2me.essentials.utils.DateUtil;
@@ -43,6 +44,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
@@ -50,6 +52,7 @@ import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerEggThrowEvent;
 import org.bukkit.event.player.PlayerFishEvent;
+import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerLoginEvent;
@@ -345,6 +348,7 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
 
         ess.getBackup().onPlayerJoin();
         final User dUser = ess.getUser(player);
+        ((ModernUserMap) ess.getUsers()).getOnlineUserCache().put(player.getUniqueId(), dUser);
         dUser.update(player);
 
         dUser.startTransaction();
@@ -574,6 +578,17 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
                 event.disallow(Result.KICK_FULL, tlLiteral("serverFull"));
             }
         }
+        if (event.getResult() == Result.KICK_WHITELIST) {
+            final User kfuser = ess.getUser(event.getPlayer());
+            kfuser.update(event.getPlayer());
+            if (kfuser.isAuthorized("essentials.whitelist.bypass")) {
+                event.allow();
+                return;
+            }
+            if (ess.getSettings().isCustomWhitelistMessage()) {
+                event.disallow(Result.KICK_WHITELIST, tlLiteral("whitelistKick"));
+            }
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -595,8 +610,12 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
         if (tickCountProvider != null && ess.getSettings().isWorldChangePreserveFlying() && VersionUtil.getServerBukkitVersion().isHigherThanOrEqualTo(VersionUtil.v1_17_R01)) {
             if (user.isAuthorized("essentials.fly")) {
                 //noinspection DataFlowIssue - not real
-                if (event.getFrom().getWorld() != event.getTo().getWorld() && player.isFlying()) {
-                    user.setFlightTick(tickCountProvider.getTickCount());
+                if (event.getFrom().getWorld() != event.getTo().getWorld() && player.getAllowFlight()) {
+                    // If the player is not flying but has the ability to fly, we set the sign of the tick count to -1
+                    // Later on in the PlayerChangedWorldEvent, we will set the player's flying state to true if the tick count is positive.
+                    // If the tick count is negative, we simply just set the player's flight ability to true.
+                    final int tick = player.isFlying() ? tickCountProvider.getTickCount() : -tickCountProvider.getTickCount();
+                    user.setFlightTick(tick);
                 }
             }
         }
@@ -778,9 +797,12 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
         }
 
         final TickCountProvider tickCountProvider = ess.provider(TickCountProvider.class);
-        if (tickCountProvider != null && user.getFlightTick() == tickCountProvider.getTickCount() && user.isAuthorized("essentials.fly")) {
+        final int flightTick = user.getFlightTick();
+        if (tickCountProvider != null && Math.abs(flightTick) == tickCountProvider.getTickCount() && user.isAuthorized("essentials.fly")) {
             user.getBase().setAllowFlight(true);
-            user.getBase().setFlying(true);
+            if (flightTick > 0) {
+                user.getBase().setFlying(true);
+            }
         }
         user.setFlightTick(-1);
     }
@@ -977,6 +999,26 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
         return false;
     }
 
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onInventoryDragEvent(final InventoryDragEvent event) {
+        final InventoryViewProvider provider = ess.provider(InventoryViewProvider.class);
+        final Inventory top = provider.getTopInventory(event.getView());
+        if (top.getType() != InventoryType.PLAYER) {
+            return;
+        }
+        final User user = ess.getUser((Player) event.getWhoClicked());
+        if (!user.isInvSee()) {
+            return;
+        }
+
+        for (int slot : event.getNewItems().keySet()) {
+            if (Inventories.isBottomInventorySlot(slot)) {
+                event.setCancelled(true);
+                break;
+            }
+        }
+    }
+
     @EventHandler(priority = EventPriority.MONITOR)
     public void onInventoryCloseEvent(final InventoryCloseEvent event) {
         Player refreshPlayer = null;
@@ -1016,6 +1058,27 @@ public class EssentialsPlayerListener implements Listener, FakeAccessor {
     public void onPlayerFishEvent(final PlayerFishEvent event) {
         final User user = ess.getUser(event.getPlayer());
         user.updateActivityOnInteract(true);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerGameModeChange(final PlayerGameModeChangeEvent event) {
+        if (!ess.getSettings().isGamemodeChangePreserveFlying()) {
+            return;
+        }
+
+        final User user = ess.getUser(event.getPlayer());
+        if (!user.isAuthorized("essentials.fly")) {
+            return;
+        }
+
+        final Player player = event.getPlayer();
+        if (player.isFlying() && player.getAllowFlight() && user.isAuthorized("essentials.fly")) {
+            // The gamemode change happens after the event, so we need to delay the flight enable
+            ess.scheduleSyncDelayedTask(() -> {
+                player.setAllowFlight(true);
+                player.setFlying(true);
+            }, 1);
+        }
     }
 
     private static final class ArrowPickupListener implements Listener {
